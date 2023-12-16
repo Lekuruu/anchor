@@ -2,6 +2,7 @@
 from twisted.internet import reactor
 
 from app.common.logging import Console, File
+from app.irc.server import IRCFactory
 from app.server import BanchoFactory
 
 import logging
@@ -19,13 +20,19 @@ logging.basicConfig(
 def main():
     utils.setup()
 
-    factory = BanchoFactory()
+    bancho = BanchoFactory()
+    irc = IRCFactory()
 
     for port in config.PORTS:
-        reactor.listenTCP(port, factory)
+        reactor.listenTCP(port, bancho)
         app.session.logger.info(
             f'Reactor listening on port: {port}'
         )
+
+    reactor.listenTCP(config.IRC_PORT, irc)
+    app.session.logger.info(
+        f'Reactor listening on port: {config.IRC_PORT}'
+    )
 
     reactor.run()
 
