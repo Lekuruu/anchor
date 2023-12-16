@@ -126,6 +126,22 @@ class Players(List[Player]):
             except AttributeError:
                 continue
 
+from ..irc.client import IRCClient
+
+class IRCClients(List[IRCClient]):
+    def __iter__(self) -> Iterator[IRCClient]:
+        return super().__iter__()
+
+    def append(self, client: IRCClient) -> None:
+        """Append a player to the collection"""
+        if client not in self:
+            return super().append(client)
+
+    def remove(self, client: IRCClient) -> None:
+        """Remove a player from the collection"""
+        if client in self:
+            return super().remove(client)
+
 from .channel import Channel
 
 class Channels(List[Channel]):
@@ -215,5 +231,3 @@ class Matches(List[Match | None]):
 
             # Remove inactive match
             self.pop(index)
-
-# TODO: IRC Players

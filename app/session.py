@@ -1,5 +1,5 @@
 
-from .objects.collections import Players, Channels, Matches
+from .objects.collections import Players, Channels, Matches, IRCClients
 from .common.cache.events import EventQueue
 from .clients import DefaultResponsePacket
 from .common.database import Postgres
@@ -46,6 +46,7 @@ handlers: Dict[DefaultResponsePacket, Callable] = {}
 pool: ThreadPool = reactor.getThreadPool()
 pool.adjustPoolsize(5, config.BANCHO_WORKERS)
 
+irc_players = IRCClients()
 channels = Channels()
 storage = Storage()
 players = Players()
