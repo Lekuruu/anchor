@@ -24,6 +24,7 @@ AUTOJOIN_CHANNELS = eval(os.environ.get('AUTOJOIN_CHANNELS', "['#osu', '#announc
 BANCHO_WORKERS = int(os.environ.get('BANCHO_WORKERS', 15))
 
 PORTS = eval(os.environ.get('BANCHO_PORTS', '[13381, 13382, 13383]'))
+IRC_PORT = int(os.environ.get('IRC_PORT', '6667'))
 
 DOMAIN_NAME = os.environ.get('DOMAIN_NAME')
 
