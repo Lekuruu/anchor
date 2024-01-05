@@ -1,10 +1,13 @@
 
-from typing import List, Union, Optional, NamedTuple, Callable
+from __future__ import annotations
+
+from typing import List, NamedTuple, Callable
 from pytimeparse.timeparse import timeparse
 from datetime import timedelta, datetime
 from dataclasses import dataclass
 from threading import Thread
 
+from .common import officer
 from .common.cache import leaderboards
 from .common.database.repositories import (
     infringements,
@@ -13,6 +16,7 @@ from .common.database.repositories import (
     matches,
     clients,
     reports,
+    groups,
     events,
     scores,
     stats,
@@ -38,14 +42,17 @@ from .objects.player import Player
 import timeago
 import config
 import random
+import shlex
+import utils
 import time
 import app
+import os
 
 @dataclass(slots=True)
 class Context:
     player: Player
     trigger: str
-    target: Union[Channel, Player]
+    target: Channel | Player
     args: List[str]
 
 @dataclass(slots=True)
@@ -56,9 +63,9 @@ class CommandResponse:
 class Command(NamedTuple):
     triggers: List[str]
     callback: Callable
-    permissions: Permissions
+    groups: List[str]
     hidden: bool
-    doc: Optional[str]
+    doc: str | None
 
 class CommandSet:
     def __init__(self, trigger: str, doc: str) -> None:
@@ -72,7 +79,7 @@ class CommandSet:
         self,
         aliases:
         List[str],
-        p: Permissions = Permissions.Normal,
+        groups: List[str] = ['Players'],
         hidden: bool = False
     ) -> Callable:
         def wrapper(f: Callable):
@@ -80,7 +87,7 @@ class CommandSet:
                 Command(
                     aliases,
                     f,
-                    p,
+                    groups,
                     hidden,
                     doc=f.__doc__
                 )
@@ -98,17 +105,11 @@ sets = [
     system_commands := CommandSet('system', 'System Commands')
 ]
 
-# TODO: !system deploy
-# TODO: !system restart
-# TODO: !system shutdown
-# TODO: !system stats
-# TODO: !system exec
-
 @system_commands.condition
 def is_admin(ctx: Context) -> bool:
     return ctx.player.is_admin
 
-@system_commands.register(['maintenance', 'panic'], Permissions.Admin)
+@system_commands.register(['maintenance', 'panic'], ['Admins'])
 def maintenance_mode(ctx: Context) -> List[str]:
     """<on/off>"""
     if ctx.args:
@@ -129,6 +130,96 @@ def maintenance_mode(ctx: Context) -> List[str]:
         f'Maintenance mode is now {"enabled" if config.MAINTENANCE else "disabled"}.'
     ]
 
+@system_commands.register(['setenv', 'setcfg'], ['Admins'])
+def set_config_value(ctx: Context) -> List[str]:
+    """<env> <value> - Update a config value"""
+    if len(ctx.args) < 2:
+        return [f'Invalid syntax: !{system_commands.trigger} {ctx.trigger} <env> <value>']
+
+    env_name = ctx.args[0]
+    value = ' '.join(ctx.args[1:])
+
+    config.dotenv.set_key('.env', env_name, value)
+    setattr(config, env_name, value)
+
+    if env_name.startswith('MENUICON'):
+        # Enqueue menu icon to all players
+        for player in app.session.players:
+            player.send_packet(
+                player.packets.MENU_ICON,
+                config.MENUICON_IMAGE,
+                config.MENUICON_URL
+            )
+
+    return ['Config was updated.']
+
+@system_commands.register(['getenv', 'getcfg', 'env', 'config', 'cfg'], ['Admins'])
+def get_config_value(ctx: Context) -> List[str]:
+    """<env> - Get a config value"""
+    if len(ctx.args) < 1:
+        return [f'Invalid syntax: !{system_commands.trigger} {ctx.trigger} <env>']
+
+    return [getattr(config, ctx.args[0])]
+
+@system_commands.register(['reloadcfg', 'reloadenv'], ['Admins'])
+def reload_config(ctx: Context) -> List[str]:
+    """- Reload the config"""
+
+    config.dotenv.load_dotenv(override=True)
+
+    config.POSTGRES_PASSWORD = os.environ.get('POSTGRES_PASSWORD')
+    config.POSTGRES_PORT = int(os.environ.get('POSTGRES_PORT', 5432))
+    config.POSTGRES_USER = os.environ.get('POSTGRES_USER')
+    config.POSTGRES_HOST = os.environ.get('POSTGRES_HOST')
+
+    config.POSTGRES_POOLSIZE = int(os.environ.get('POSTGRES_POOLSIZE', 10))
+    config.POSTGRES_POOLSIZE_OVERFLOW = int(os.environ.get('POSTGRES_POOLSIZE_OVERFLOW', 30))
+
+    config.S3_ACCESS_KEY = os.environ.get('S3_ACCESS_KEY')
+    config.S3_SECRET_KEY = os.environ.get('S3_SECRET_KEY')
+    config.S3_BASEURL    = os.environ.get('S3_BASEURL')
+
+    config.REDIS_HOST = os.environ.get('REDIS_HOST')
+    config.REDIS_PORT = int(os.environ.get('REDIS_PORT', 6379))
+
+    config.AUTOJOIN_CHANNELS = eval(os.environ.get('AUTOJOIN_CHANNELS', "['#osu', '#announce']"))
+    config.BANCHO_WORKERS = int(os.environ.get('BANCHO_WORKERS', 15))
+    config.TCP_PORTS = eval(os.environ.get('BANCHO_PORTS', '[13381, 13382, 13383]'))
+
+    config.DOMAIN_NAME = os.environ.get('DOMAIN_NAME')
+
+    config.SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY')
+    config.SENDGRID_EMAIL = os.environ.get('SENDGRID_EMAIL')
+
+    config.MAILGUN_API_KEY = os.environ.get('MAILGUN_API_KEY')
+    config.MAILGUN_EMAIL = os.environ.get('MAILGUN_EMAIL')
+    config.MAILGUN_URL = os.environ.get('MAILGUN_URL', 'api.eu.mailgun.net')
+    config.MAILGUN_DOMAIN = config.MAILGUN_EMAIL.split('@')[-1]
+
+    config.EMAILS_ENABLED = config.MAILGUN_API_KEY is not None or config.SENDGRID_API_KEY is not None
+    config.EMAIL = config.MAILGUN_EMAIL or config.SENDGRID_EMAIL
+
+    config.MENUICON_IMAGE = os.environ.get('MENUICON_IMAGE')
+    config.MENUICON_URL = os.environ.get('MENUICON_URL')
+
+    config.DISABLE_CLIENT_VERIFICATION = eval(os.environ.get('DISABLE_CLIENT_VERIFICATION', 'True').capitalize())
+    config.APPROVED_MAP_REWARDS = eval(os.environ.get('APPROVED_MAP_REWARDS', 'False').capitalize())
+    config.MAINTENANCE = eval(os.environ.get('BANCHO_MAINTENANCE', 'False').capitalize())
+    config.S3_ENABLED = eval(os.environ.get('ENABLE_S3', 'True').capitalize())
+    config.DEBUG = eval(os.environ.get('DEBUG', 'False').capitalize())
+
+    return ['Config was reloaded.']
+
+@system_commands.register(['exec', 'python'], ['Admins'])
+def execute(ctx: Context):
+    """<input> - Execute any python code"""
+    if not ctx.args:
+        return [f'Invalid syntax: !{system_commands.trigger} {ctx.trigger} <input>']
+
+    input = ' '.join(ctx.args)
+
+    return [str(eval(input))]
+
 @mp_commands.condition
 def inside_match(ctx: Context) -> bool:
     return ctx.player.match is not None
@@ -140,7 +231,6 @@ def inside_chat(ctx: Context) -> bool:
 @mp_commands.condition
 def is_host(ctx: Context) -> bool:
     return (ctx.player is ctx.player.match.host) or \
-           (ctx.player.is_tourney_manager) or \
            (ctx.player.is_admin)
 
 @mp_commands.register(['help', 'h'], hidden=True)
@@ -149,7 +239,12 @@ def mp_help(ctx: Context):
     response = []
 
     for command in mp_commands.commands:
-        if command.permissions not in ctx.player.permissions:
+        has_permissions = any(
+            group in command.groups
+            for group in ctx.player.groups
+        )
+
+        if not has_permissions:
             continue
 
         if not command.doc:
@@ -400,7 +495,7 @@ def mp_invite(ctx: Context):
 
     return [f'Invited {target.name} to this match.']
 
-@mp_commands.register(['force', 'forceinvite'], Permissions.Admin)
+@mp_commands.register(['force', 'forceinvite'], ['Admins'])
 def mp_force_invite(ctx: Context):
     """<name> - Force a player to join this match"""
     if len(ctx.args) <= 0:
@@ -723,7 +818,7 @@ def mp_password(ctx: Context):
 
 def command(
     aliases: List[str],
-    p: Permissions = Permissions.Normal,
+    groups: List[str] = ['Players'],
     hidden: bool = True,
 ) -> Callable:
     def wrapper(f: Callable) -> Callable:
@@ -731,7 +826,7 @@ def command(
             Command(
                 aliases,
                 f,
-                p,
+                groups,
                 hidden,
                 f.__doc__
             ),
@@ -740,14 +835,19 @@ def command(
     return wrapper
 
 @command(['help', 'h', ''])
-def help(ctx: Context) -> Optional[List]:
+def help(ctx: Context) -> List | None:
     """- Shows this message"""
     response = []
 
     # Standard commands
     response.append('Standard Commands:')
     for command in commands:
-        if command.permissions not in ctx.player.permissions:
+        has_permissions = any(
+            group in command.groups
+            for group in ctx.player.groups
+        )
+
+        if not has_permissions:
             continue
 
         response.append(
@@ -767,7 +867,12 @@ def help(ctx: Context) -> Optional[List]:
             response.append(f'{set.doc} (!{set.trigger}):')
 
             for command in set.commands:
-                if command.permissions not in ctx.player.permissions:
+                has_permissions = any(
+                    group in command.groups
+                    for group in ctx.player.groups
+                )
+
+                if not has_permissions:
                     continue
 
                 if not command.doc:
@@ -780,7 +885,7 @@ def help(ctx: Context) -> Optional[List]:
     return response
 
 @command(['roll'], hidden=False)
-def roll(ctx: Context) -> Optional[List]:
+def roll(ctx: Context) -> List | None:
     """<number> - Roll a dice and get random result from 1 to <number> (default 100)"""
     max_roll = 100
 
@@ -796,7 +901,7 @@ def roll(ctx: Context) -> Optional[List]:
     return [f'{ctx.player.name} rolls {random.randrange(0, max_roll+1)}!']
 
 @command(['report'])
-def report(ctx: Context) -> Optional[List]:
+def report(ctx: Context) -> List | None:
     """<username> <reason>"""
     if len(ctx.args) < 1:
         return [f'Invalid syntax: !{ctx.trigger} <username> (<reason>)']
@@ -840,7 +945,7 @@ def report(ctx: Context) -> Optional[List]:
 
     return ['Chat moderators have been alerted. Thanks for your help.']
 
-@command(['search'], Permissions.Supporter, hidden=False)
+@command(['search'], ['Supporters'], hidden=False)
 def search(ctx: Context):
     """<query> - Search a beatmap"""
     query = ' '.join(ctx.args[0:])
@@ -917,8 +1022,8 @@ def get_client_version(ctx: Context):
 
     return [f"{target.name} is playing on {target.client.version.string}"]
 
-@command(['monitor'], Permissions.Admin)
-def monitor(ctx: Context) -> Optional[List]:
+@command(['monitor'], ['Admins'])
+def monitor(ctx: Context) -> List | None:
     """<name> - Monitor a player"""
 
     if len(ctx.args) < 1:
@@ -933,8 +1038,8 @@ def monitor(ctx: Context) -> Optional[List]:
 
     return ['Player has been monitored']
 
-@command(['alert', 'announce', 'broadcast'], Permissions.Admin)
-def alert(ctx: Context) -> Optional[List]:
+@command(['alert', 'announce', 'broadcast'], ['Admins', 'Developers'])
+def alert(ctx: Context) -> List | None:
     """<message> - Send a message to all players"""
 
     if not ctx.args:
@@ -944,8 +1049,8 @@ def alert(ctx: Context) -> Optional[List]:
 
     return [f'Alert was sent to {len(app.session.players)} players.']
 
-@command(['alertuser'], Permissions.Admin)
-def alertuser(ctx: Context) -> Optional[List]:
+@command(['alertuser'], ['Admins', 'Developers'])
+def alertuser(ctx: Context) -> List | None:
     """<username> <message> - Send a notification to a player"""
 
     if len(ctx.args) < 2:
@@ -960,8 +1065,8 @@ def alertuser(ctx: Context) -> Optional[List]:
 
     return [f'Alert was sent to {player.name}.']
 
-@command(['silence', 'mute'], Permissions.Admin, hidden=False)
-def silence(ctx: Context) -> Optional[List]:
+@command(['silence', 'mute'], ['Admins', 'Developers', 'Global Moderator Team'], hidden=False)
+def silence(ctx: Context) -> List | None:
     """<username> <duration> (<reason>)"""
 
     if len(ctx.args) < 2:
@@ -1005,7 +1110,7 @@ def silence(ctx: Context) -> Optional[List]:
 
     return [f'{player.name} was silenced for {time_string}']
 
-@command(['unsilence', 'unmute'], Permissions.Admin, hidden=False)
+@command(['unsilence', 'unmute'], ['Admins', 'Developers', 'Global Moderator Team'], hidden=False)
 def unsilence(ctx: Context):
     """- <username>"""
 
@@ -1023,10 +1128,14 @@ def unsilence(ctx: Context):
 
     users.update(player.id, {'silence_end': None})
 
+    # Delete infringements from website
+    inf = infringements.fetch_recent_by_action(player.id, action=1)
+    if inf: infringements.delete_by_id(inf.id)
+
     return [f'{player.name} was unsilenced.']
 
-@command(['restrict', 'ban'], Permissions.Admin, hidden=False)
-def restrict(ctx: Context) -> Optional[List]:
+@command(['restrict', 'ban'], ['Admins', 'Developers', 'Global Moderator Team'], hidden=False)
+def restrict(ctx: Context) -> List | None:
     """ <name> <length/permanent> (<reason>)"""
 
     if len(ctx.args) < 2:
@@ -1058,12 +1167,18 @@ def restrict(ctx: Context) -> Optional[List]:
                 'permissions': 0
             }
         )
+
         leaderboards.remove(
             player.id,
             player.country
         )
+
         stats.delete_all(player.id)
         scores.hide_all(player.id)
+
+        # Remove permissions
+        groups.delete_entry(player.id, 999)
+        groups.delete_entry(player.id, 1000)
 
         # Update hardware
         clients.update_all(player.id, {'banned': True})
@@ -1076,6 +1191,8 @@ def restrict(ctx: Context) -> Optional[List]:
             description=reason,
             is_permanent=True if not until else False
         )
+
+        officer.call(f'{player.name} was restricted. Reason: "{reason}"')
     else:
         # Player is online
         player.restrict(
@@ -1085,8 +1202,8 @@ def restrict(ctx: Context) -> Optional[List]:
 
     return [f'{player.name} was restricted.']
 
-@command(['unrestrict', 'unban'], Permissions.Admin, hidden=False)
-def unrestrict(ctx: Context) -> Optional[List]:
+@command(['unrestrict', 'unban'], ['Admins', 'Developers', 'Global Moderator Team'], hidden=False)
+def unrestrict(ctx: Context) -> List | None:
     """<name> <restore scores (true/false)>"""
 
     if len(ctx.args) < 1:
@@ -1107,9 +1224,13 @@ def unrestrict(ctx: Context) -> Optional[List]:
     users.update(player.id,
         {
             'restricted': False,
-            'permissions': 5 if config.FREE_SUPPORTER else 1
+            'permissions': 5
         }
     )
+
+    # Add to player & supporter group
+    groups.create_entry(player.id, 999)
+    groups.create_entry(player.id, 1000)
 
     # Update hardware
     clients.update_all(player.id, {'banned': False})
@@ -1123,12 +1244,16 @@ def unrestrict(ctx: Context) -> Optional[List]:
                 f'Failed to restore scores of player "{player.name}": {e}',
                 exc_info=e
             )
+            officer.call(
+                f'Failed to restore scores of player "{player.name}": {e}',
+                exc_info=e
+            )
             return ['Failed to restore scores, but player was unrestricted.']
 
     return [f'Player "{username}" was unrestricted.']
 
-@command(['moderated'], Permissions.Admin, hidden=False)
-def moderated(ctx: Context) -> Optional[List]:
+@command(['moderated'], ['Admins', 'Developers', 'Global Moderator Team'], hidden=False)
+def moderated(ctx: Context) -> List | None:
     """<on/off>"""
     if len(ctx.args) != 1 and ctx.args[0] not in ('on', 'off'):
         return [f'Invalid syntax: !{ctx.trigger} <on/off>']
@@ -1140,8 +1265,8 @@ def moderated(ctx: Context) -> Optional[List]:
 
     return [f'Moderated mode is now {"enabled" if ctx.target.moderated else "disabled"}.']
 
-@command(['kick', 'disconnect'], Permissions.Admin, hidden=False)
-def kick(ctx: Context) -> Optional[List]:
+@command(['kick', 'disconnect'], ['Admins', 'Developers', 'Global Moderator Team'], hidden=False)
+def kick(ctx: Context) -> List | None:
     """<username>"""
     if len(ctx.args) <= 0:
         return [f'Invalid syntax: !{ctx.trigger} <username>']
@@ -1155,8 +1280,8 @@ def kick(ctx: Context) -> Optional[List]:
 
     return [f'{player.name} was disconnected from bancho.']
 
-@command(['kill', 'close'], Permissions.Admin, hidden=False)
-def kill(ctx: Context) -> Optional[List]:
+@command(['kill', 'close'], ['Admins', 'Developers', 'Global Moderator Team'], hidden=False)
+def kill(ctx: Context) -> List | None:
     """<username>"""
     if len(ctx.args) <= 0:
         return [f'Invalid syntax: !{ctx.trigger} <username>']
@@ -1166,15 +1291,15 @@ def kill(ctx: Context) -> Optional[List]:
     if not (player := app.session.players.by_name(username)):
         return [f'User "{username}" was not found.']
 
-    player.object.permissions = 255
+    player.permissions = Permissions(255)
     player.enqueue_permissions()
     player.enqueue_ping()
     player.close_connection()
 
     return [f'{player.name} was disconnected from bancho.']
 
-@command(['multi', 'multiaccount', 'hardware'], Permissions.Admin)
-def multi(ctx: Context) -> Optional[List]:
+@command(['multi', 'multiaccount', 'hardware'], ['Admins'])
+def multi(ctx: Context) -> List | None:
     """<username>"""
     if len(ctx.args) <= 0:
         return [f'Invalid syntax: !{ctx.trigger} <username>']
@@ -1217,19 +1342,23 @@ def multi(ctx: Context) -> Optional[List]:
 
 def get_command(
     player: Player,
-    target: Union[Channel, Player],
+    target: Channel | Player,
     message: str
-) -> Optional[CommandResponse]:
+) -> CommandResponse | None:
     # Parse command
-    trigger, *args = message.strip()[1:].split(' ')
+    trigger, *args = shlex.split(message.strip()[1:])
     trigger = trigger.lower()
 
     # Regular commands
     for command in commands:
         if trigger in command.triggers:
-            # Check permissions
-            if command.permissions not in player.permissions:
-                return None
+            has_permissions = any(
+                group in command.groups
+                for group in player.groups
+            )
+
+            if not has_permissions:
+                return
 
             # Try running the command
             try:
@@ -1266,9 +1395,13 @@ def get_command(
 
         for command in set.commands:
             if trigger in command.triggers:
-                # Check permissions
-                if command.permissions not in player.permissions:
-                    return None
+                has_permissions = any(
+                    group in command.groups
+                    for group in player.groups
+                )
+
+                if not has_permissions:
+                    continue
 
                 ctx = Context(
                     player,
@@ -1302,7 +1435,7 @@ def get_command(
 
 def execute(
     player: Player,
-    target: Union[Channel, Player],
+    target: Channel | Player,
     command_message: str
 ):
     if not command_message.startswith('!'):

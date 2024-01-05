@@ -2,10 +2,11 @@
 from . import DefaultResponsePacket as ResponsePacket
 from . import DefaultRequestPacket as RequestPacket
 
-from ..common.database.objects import DBBeatmap
+from ..common.database.objects import DBBeatmap, DBScore
 from ..objects.multiplayer import Match
 from ..objects.channel import Channel
 from ..objects.player import Player
+from ..common import officer
 from .. import session, commands
 
 from ..common.database.repositories import (
@@ -13,7 +14,6 @@ from ..common.database.repositories import (
     beatmaps,
     messages,
     matches,
-    scores,
     events
 )
 
@@ -42,12 +42,10 @@ from ..common.constants import (
 )
 
 from typing import Callable, Tuple, Optional, List
-from twisted.internet import threads
 from datetime import datetime
 from copy import copy
 
 import config
-import utils
 import time
 
 def register(packet: RequestPacket) -> Callable:
@@ -61,9 +59,11 @@ def resolve_channel(channel_name: str, player: Player) -> Optional[Channel]:
     try:
         if channel_name == '#spectator':
             # Select spectator chat
-            return (player.spectating.spectator_chat
-                    if player.spectating else
-                        player.spectator_chat)
+            return (
+                player.spectating.spectator_chat
+                if player.spectating else
+                   player.spectator_chat
+            )
 
         elif channel_name == '#multiplayer':
             # Select multiplayer chat
@@ -77,11 +77,12 @@ def resolve_channel(channel_name: str, player: Player) -> Optional[Channel]:
 
 @register(RequestPacket.PONG)
 def pong(player: Player):
-    pass
+    pass # lol
 
 @register(RequestPacket.EXIT)
 def exit(player: Player, updating: bool):
     player.update_activity()
+    player.close_connection()
 
 @register(RequestPacket.RECEIVE_UPDATES)
 def receive_updates(player: Player, filter: PresenceFilter):
@@ -138,6 +139,15 @@ def request_status(player: Player):
 
 @register(RequestPacket.JOIN_CHANNEL)
 def handle_channel_join(player: Player, channel_name: str):
+    client_channels = [
+        '#userlog',
+        '#highlight'
+    ]
+
+    if channel_name in client_channels:
+        player.join_success(channel_name)
+        return
+
     if not (channel := resolve_channel(channel_name, player)):
         player.revoke_channel(channel_name)
         return
@@ -157,6 +167,14 @@ def channel_leave(player: Player, channel_name: str, kick: bool = False):
 
 @register(RequestPacket.SEND_MESSAGE)
 def send_message(player: Player, message: bMessage):
+    client_channels = [
+        '#userlog',
+        '#highlight'
+    ]
+
+    if message.target in client_channels:
+        return
+
     if not (channel := resolve_channel(message.target, player)):
         player.revoke_channel(message.target)
         return
@@ -164,11 +182,11 @@ def send_message(player: Player, message: bMessage):
     if message.content.startswith('/me'):
         message.content = f'\x01ACTION{message.content.removeprefix("/me")}\x01'
 
-    if (time.time() - player.last_minute_stamp) > 60:
+    if (time.time() - player.last_minute_stamp) > 10:
         player.last_minute_stamp = time.time()
-        player.messages_in_last_minute = 0
+        player.recent_message_count = 0
 
-    if player.messages_in_last_minute > 400:
+    if player.recent_message_count > 35:
         player.silence(60, reason='Chat spamming')
         return
 
@@ -177,20 +195,14 @@ def send_message(player: Player, message: bMessage):
         commands.execute(player, channel, parsed_message)
         return
 
-    channel.send_message(player, parsed_message)
-
-    player.messages_in_last_minute += 1
-
-    threads.deferToThread(
-        messages.create,
-        player.name,
-        channel.name,
-        message.content
-    ).addErrback(
-        utils.thread_callback
+    channel.send_message(
+        player,
+        parsed_message,
+        submit_to_database=True
     )
 
     player.update_activity()
+    player.recent_message_count += 1
 
 @register(RequestPacket.SEND_PRIVATE_MESSAGE)
 def send_private_message(sender: Player, message: bMessage):
@@ -219,9 +231,9 @@ def send_private_message(sender: Player, message: bMessage):
 
     if (time.time() - sender.last_minute_stamp) > 60:
         sender.last_minute_stamp = time.time()
-        sender.messages_in_last_minute = 0
+        sender.recent_message_count = 0
 
-    if sender.messages_in_last_minute > 400:
+    if sender.recent_message_count > 35:
         sender.silence(60, reason='Chat spamming')
         return
 
@@ -256,11 +268,11 @@ def send_private_message(sender: Player, message: bMessage):
         )
     )
 
-    sender.messages_in_last_minute += 1
+    sender.recent_message_count += 1
 
     # Send to their tourney clients
     for client in session.players.get_all_tourney_clients(target.id):
-        if client.address.port == target.address.port:
+        if client.port == target.port:
             continue
 
         client.enqueue_message(
@@ -275,13 +287,10 @@ def send_private_message(sender: Player, message: bMessage):
 
     sender.logger.info(f'[PM -> {target.name}]: {message.content}')
 
-    threads.deferToThread(
-        messages.create,
+    messages.create(
         sender.name,
         target.name,
         message.content
-    ).addErrback(
-        utils.thread_callback
     )
 
     sender.update_activity()
@@ -359,87 +368,110 @@ def beatmap_info(player: Player, info: bBeatmapInfoRequest, ignore_limit: bool =
     maps: List[Tuple[int, DBBeatmap]] = []
 
     # Limit request filenames/ids
-
     if not ignore_limit:
         info.beatmap_ids = info.beatmap_ids[:100]
         info.filenames = info.filenames[:100]
 
+    total_maps = len(info.beatmap_ids) + len(info.filenames)
+
+    if total_maps <= 0:
+        return
+
+    player.logger.info(
+        f'Got {total_maps} beatmap requests'
+    )
+
     # Fetch all matching beatmaps from database
+    with session.database.managed_session() as s:
+        filename_beatmaps = s.query(DBBeatmap) \
+            .filter(DBBeatmap.filename.in_(info.filenames)) \
+            .all()
 
-    for index, filename in enumerate(info.filenames):
-        if not (beatmap := beatmaps.fetch_by_file(filename)):
-            continue
-
-        maps.append((
-            index,
-            beatmap
-        ))
-
-    for id in info.beatmap_ids:
-        if not (beatmap := beatmaps.fetch_by_id(id)):
-            continue
-
-        maps.append((
-            -1,
-            beatmap
-        ))
-
-    player.logger.info(f'Got {len(maps)} beatmap requests')
-
-    # Create beatmap response
-
-    map_infos: List[bBeatmapInfo] = []
-
-    for index, beatmap in maps:
-        ranked = {
-            -2: 0, # Graveyard: Pending
-            -1: 0, # WIP: Pending
-             0: 0, # Pending: Pending
-             1: 1, # Ranked: Ranked
-             2: 2, # Approved: Approved
-             3: 2, # Qualified: Approved
-             4: 2, # Loved: Approved
-        }[beatmap.status]
-
-        # Get personal best in every mode for this beatmap
-        grades = {
-            0: Grade.N,
-            1: Grade.N,
-            2: Grade.N,
-            3: Grade.N
+        found_beatmaps = {
+            beatmap.filename:beatmap
+            for beatmap in filename_beatmaps
         }
 
-        for mode in range(4):
-            personal_best = scores.fetch_personal_best(
-                beatmap.id,
-                player.id,
-                mode
-            )
+        for index, filename in enumerate(info.filenames):
+            if filename not in found_beatmaps:
+                continue
 
-            if personal_best:
-                grades[mode] = Grade[personal_best.grade]
-
-        map_infos.append(
-            bBeatmapInfo(
+            # The client will identify the beatmaps by their index
+            # in the "beatmapInfoSendList" array for the filenames
+            maps.append((
                 index,
-                beatmap.id,
-                beatmap.set_id,
-                beatmap.set_id, # thread_id
-                ranked,
-                grades[0], # standard
-                grades[2], # fruits
-                grades[1], # taiko
-                grades[3], # mania
-                beatmap.md5
+                found_beatmaps[filename]
+            ))
+
+        id_beatmaps = s.query(DBBeatmap) \
+            .filter(DBBeatmap.id.in_(info.beatmap_ids)) \
+            .all()
+
+        for beatmap in id_beatmaps:
+            # For the ids, the client doesn't require the index
+            # and we can just set it to -1, so that it will lookup
+            # the beatmap by its id
+            maps.append((
+                -1,
+                beatmap
+            ))
+
+        # Create beatmap response
+        map_infos: List[bBeatmapInfo] = []
+
+        for index, beatmap in maps:
+            ranked = {
+                -2: 0, # Graveyard: Pending
+                -1: 0, # WIP: Pending
+                 0: 0, # Pending: Pending
+                 1: 1, # Ranked: Ranked
+                 2: 2, # Approved: Approved
+                 3: 2, # Qualified: Approved
+                 4: 2, # Loved: Approved
+            }[beatmap.status]
+
+            # Get personal best in every mode for this beatmap
+            grades = {
+                0: Grade.N,
+                1: Grade.N,
+                2: Grade.N,
+                3: Grade.N
+            }
+
+            for mode in range(4):
+                grade = s.query(DBScore.grade) \
+                    .filter(DBScore.beatmap_id == beatmap.id) \
+                    .filter(DBScore.user_id == player.id) \
+                    .filter(DBScore.mode == mode) \
+                    .filter(DBScore.status == 3) \
+                    .scalar()
+
+                if grade:
+                    grades[mode] = Grade[grade]
+
+            map_infos.append(
+                bBeatmapInfo(
+                    index,
+                    beatmap.id,
+                    beatmap.set_id,
+                    beatmap.set_id, # thread_id
+                    ranked,
+                    grades[0], # standard
+                    grades[2], # fruits
+                    grades[1], # taiko
+                    grades[3], # mania
+                    beatmap.md5
+                )
             )
+
+        player.logger.info(
+            f'Sending reply with {len(map_infos)} beatmaps'
         )
 
-    player.logger.info(f'Sending reply with {len(map_infos)} beatmaps')
-
-    player.send_packet(
-        player.packets.BEATMAP_INFO_REPLY,
-        bBeatmapInfoReply(map_infos)
-    )
+        player.send_packet(
+            player.packets.BEATMAP_INFO_REPLY,
+            bBeatmapInfoReply(map_infos)
+        )
 
 @register(RequestPacket.START_SPECTATING)
 def start_spectating(player: Player, player_id: int):
@@ -500,12 +532,7 @@ def stop_spectating(player: Player):
     # Enqueue to target
     player.spectating.enqueue_spectator_left(player.id)
 
-    # If target has no spectators anymore
-    # kick them from the spectator channel
-    # if not player.spectating.spectators:
-    #     player.spectating.spectator_chat.remove(
-    #         player.spectating
-    #     )
+    # TODO: Kick from spectator channel if no spectators left?
 
     player.logger.info(f'Stopped spectating "{player.spectating.name}".')
     player.spectating = None
@@ -641,13 +668,13 @@ def create_match(player: Player, bancho_match: bMatch):
 
 @register(RequestPacket.JOIN_MATCH)
 def join_match(player: Player, match_join: bMatchJoin):
-    if not (match := session.matches[match_join.match_id]):
-        # Match was not found
+    if not session.matches.exists(match_join.match_id):
         player.logger.warning(f'{player.name} tried to join a match that does not exist')
         player.enqueue_matchjoin_fail()
         player.enqueue_match_disband(match_join.match_id)
         return
 
+    match = session.matches[match_join.match_id]
     match.last_activity = time.time()
 
     if player.is_tourney_client:
@@ -1245,9 +1272,11 @@ def tourney_match_info(player: Player, match_id: int):
         player.logger.debug("Match has already ended.")
         return
 
-    if not (match := session.matches[db_match.bancho_id]):
+    if not session.matches.exists(db_match.id):
         player.logger.debug("Bancho match is not active.")
         return
+
+    match = session.matches[db_match.bancho_id]
 
     player.logger.debug("Match found. Sending to client...")
     player.enqueue_match(match.bancho_match)
@@ -1255,6 +1284,7 @@ def tourney_match_info(player: Player, match_id: int):
 @register(RequestPacket.ERROR_REPORT)
 def bancho_error(player: Player, error: str):
     session.logger.error(f'Bancho Error Report:\n{error}')
+    officer.call(f'Bancho Error Report:\n```{error}```')
 
 @register(RequestPacket.CHANGE_FRIENDONLY_DMS)
 def change_friendonly_dms(player: Player, enabled: bool):

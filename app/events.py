@@ -1,9 +1,12 @@
 
+from app.common import officer
+from app.common.objects import bMessage
 from app.common.cache import leaderboards
 from app.common.database.repositories import (
     infringements,
     clients,
     scores,
+    groups,
     stats,
     users
 )
@@ -11,7 +14,6 @@ from app.common.database.repositories import (
 from datetime import datetime
 from typing import Optional
 
-import config
 import json
 import app
 
@@ -62,6 +64,13 @@ def bot_message(message: str, target: str):
             ignore_privs=True
         )
 
+@app.session.events.register('logout')
+def logout(user_id: int):
+    if not (player := app.session.players.by_id(user_id)):
+        return
+
+    player.close_connection()
+
 @app.session.events.register('restrict')
 def restrict(
     user_id: int,
@@ -75,6 +84,7 @@ def restrict(
 
         if not player:
             # Player was not found
+            officer.call(f'Failed to restrict user with id {user_id}: User not found!')
             return
 
         # Update user
@@ -84,6 +94,10 @@ def restrict(
                 'permissions': 0
             }
         )
+
+        # Remove permissions
+        groups.delete_entry(player.id, 999)
+        groups.delete_entry(player.id, 1000)
 
         leaderboards.remove(
             player.id,
@@ -105,8 +119,8 @@ def restrict(
             is_permanent=True if not until else False
         )
 
-        app.session.logger.warning(
-            f'{player.name} got {"auto-" if autoban else ""}restricted. Reason: {reason}'
+        officer.call(
+            f'{player.name} was {"auto-" if autoban else ""}restricted. Reason: "{reason}"'
         )
         return
 
@@ -130,9 +144,13 @@ def unrestrict(user_id: int, restore_scores: bool = True):
     users.update(player.id,
         {
             'restricted': False,
-            'permissions': 5 if config.FREE_SUPPORTER else 1
+            'permissions': 5
         }
     )
+
+    # Add to player & supporter group
+    groups.create_entry(player.id, 999)
+    groups.create_entry(player.id, 1000)
 
     # Update hardware
     clients.update_all(player.id, {'banned': False})
@@ -146,8 +164,12 @@ def unrestrict(user_id: int, restore_scores: bool = True):
                 f'Failed to restore scores of player "{player.name}": {e}',
                 exc_info=e
             )
+            officer.call(
+                f'Failed to restore scores of player "{player.name}": {e}',
+                exc_info=e
+            )
 
-    app.session.logger.warning(f'Player "{player.name}" was unrestricted.')
+    officer.call(f'Player "{player.name}" was unrestricted.')
 
 @app.session.events.register('announcement')
 def announcement(message: str):
@@ -185,6 +207,26 @@ def osu_error(user_id: int, error: dict):
             "Please try again!",
             ignore_privs=True
         )
+
+@app.session.events.register('link')
+def link_discord_user(user_id: int, code: str):
+    if not (player := app.session.players.by_id(user_id)):
+        app.session.logger.warning('Failed to link user to discord: Not Online!')
+        return
+
+    if player.object.discord_id:
+        app.session.logger.warning('Failed to link user to discord: Already Linked!')
+        return
+
+    player.enqueue_message(
+        bMessage(
+            app.session.bot_player.name,
+            f'Your verification code is: "{code}". Please type it into discord to link your account!',
+            player.name,
+            sender_id=app.session.bot_player.id,
+            is_private=True
+        )
+    )
 
 @app.session.events.register('shutdown')
 def shutdown():

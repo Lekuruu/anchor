@@ -20,26 +20,34 @@ REDIS_HOST = os.environ.get('REDIS_HOST')
 REDIS_PORT = int(os.environ.get('REDIS_PORT', 6379))
 
 AUTOJOIN_CHANNELS = eval(os.environ.get('AUTOJOIN_CHANNELS', "['#osu', '#announce']"))
-
 BANCHO_WORKERS = int(os.environ.get('BANCHO_WORKERS', 15))
-
-PORTS = eval(os.environ.get('BANCHO_PORTS', '[13381, 13382, 13383]'))
+TCP_PORTS = eval(os.environ.get('BANCHO_TCP_PORTS', '[13381, 13382, 13383]'))
+HTTP_PORT = int(os.environ.get('BANCHO_HTTP_PORT', 5000))
 IRC_PORT = int(os.environ.get('IRC_PORT', '6667'))
 
 DOMAIN_NAME = os.environ.get('DOMAIN_NAME')
 
 SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY')
 SENDGRID_EMAIL = os.environ.get('SENDGRID_EMAIL')
+
+MAILGUN_API_KEY = os.environ.get('MAILGUN_API_KEY')
+MAILGUN_EMAIL = os.environ.get('MAILGUN_EMAIL', '')
+MAILGUN_URL = os.environ.get('MAILGUN_URL', 'api.eu.mailgun.net')
+MAILGUN_DOMAIN = MAILGUN_EMAIL.split('@')[-1]
+
+EMAILS_ENABLED = MAILGUN_API_KEY is not None or SENDGRID_API_KEY is not None
+EMAIL = MAILGUN_EMAIL or SENDGRID_EMAIL
+
 MENUICON_IMAGE = os.environ.get('MENUICON_IMAGE')
 MENUICON_URL = os.environ.get('MENUICON_URL')
 
 DISABLE_CLIENT_VERIFICATION = eval(os.environ.get('DISABLE_CLIENT_VERIFICATION', 'True').capitalize())
 APPROVED_MAP_REWARDS = eval(os.environ.get('APPROVED_MAP_REWARDS', 'False').capitalize())
-SKIP_IP_DATABASE = eval(os.environ.get('SKIP_IP_DATABASE', 'False').capitalize())
 MAINTENANCE = eval(os.environ.get('BANCHO_MAINTENANCE', 'False').capitalize())
-FREE_SUPPORTER = eval(os.environ.get('FREE_SUPPORTER', 'True').capitalize())
 S3_ENABLED = eval(os.environ.get('ENABLE_S3', 'True').capitalize())
 DEBUG = eval(os.environ.get('DEBUG', 'False').capitalize())
+
+OFFICER_WEBHOOK_URL = os.environ.get('OFFICER_WEBHOOK_URL')
 
 IP_DATABASE_URL = "https://github.com/P3TERX/GeoLite.mmdb/raw/download/GeoLite2-City.mmdb"
 
