@@ -45,5 +45,4 @@ class IRCClient(IRC):
             f'"{command}": "{prefix}" {params}'
         )
 
-        # TODO: Deferred threading
         handler(self, prefix, params)
