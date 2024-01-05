@@ -1,9 +1,8 @@
 
-from twisted.words.protocols.irc import IRC, IRCBadMessage, IRCPasswordMismatch
 from twisted.internet.address import IPv4Address, IPv6Address
 from twisted.internet.error import ConnectionDone
+from twisted.words.protocols.irc import IRC
 from twisted.python.failure import Failure
-from twisted.protocols import basic
 from typing import Union, List
 
 from app.objects.channel import Channel
