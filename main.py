@@ -5,6 +5,7 @@ from app.common.database.repositories import channels
 from app.common.cache import status, usercount
 
 from app.server import TcpBanchoFactory, HttpBanchoFactory
+from app.irc.server import IRCFactory
 
 from app.common.constants import ANCHOR_ASCII_ART
 from app.common.logging import Console, File
@@ -92,9 +93,11 @@ def main():
     try:
         http_factory = HttpBanchoFactory()
         tcp_factory = TcpBanchoFactory()
+        irc_factory = IRCFactory()
 
         reactor.suggestThreadPoolSize(config.BANCHO_WORKERS)
         reactor.listenTCP(config.HTTP_PORT, http_factory)
+        reactor.listenTCP(config.IRC_PORT, irc_factory)
 
         for port in config.TCP_PORTS:
             reactor.listenTCP(port, tcp_factory)
