@@ -6,10 +6,7 @@ from .common.database import Postgres
 from .common.storage import Storage
 from .jobs import Jobs
 
-from twisted.python.threadpool import ThreadPool
-from twisted.internet import reactor
-
-from typing import Callable, Optional, Dict
+from typing import Callable, Dict
 from requests import Session
 from redis import Redis
 
@@ -43,14 +40,9 @@ requests.headers = {
 
 handlers: Dict[DefaultResponsePacket, Callable] = {}
 
-pool: ThreadPool = reactor.getThreadPool()
-pool.adjustPoolsize(5, config.BANCHO_WORKERS)
-
 irc_players = IRCClients()
 channels = Channels()
 storage = Storage()
 players = Players()
 matches = Matches()
 jobs = Jobs()
-
-client_manifest: Optional[dict] = None

@@ -38,6 +38,7 @@ from app.common.database.repositories import (
     stats
 )
 
+from app.common.helpers import clients as client_utils
 from app.common.streams import StreamIn, StreamOut
 from app.common.database import DBUser, DBStats
 from app.objects import OsuClient, Status
@@ -58,12 +59,12 @@ from app.clients import (
     DefaultRequestPacket
 )
 
+import itertools
 import hashlib
 import timeago
 import logging
 import config
 import bcrypt
-import utils
 import time
 import gzip
 import app
@@ -115,11 +116,10 @@ class Player:
 
     def __eq__(self, other) -> bool:
         if isinstance(other, Player):
-            return self.id == other.id
-        if isinstance(other, int):
-            return self.id == other
-        if isinstance(other, str):
-            return self.name == other
+            return (
+                self.id == other.id and
+                self.port == other.port
+            )
         return False
 
     def __hash__(self) -> int:
@@ -127,28 +127,28 @@ class Player:
 
     @classmethod
     def bot_player(cls):
-        # TODO: Refactor bot related code to IRC client
-        player = Player('127.0.0.1', 1337)
-        player.object = users.fetch_by_id(1)
-        player.client = OsuClient.empty()
+        with app.session.database.managed_session() as session:
+            # TODO: Refactor bot related code to IRC client
+            player = Player('127.0.0.1', 6969)
+            player.object = users.fetch_by_id(1, session=session)
+            player.client = OsuClient.empty()
 
-        player.id = -player.object.id # Negative user id -> IRC Player
-        player.name = player.object.name
-        player.stats  = player.object.stats
+            player.id = -player.object.id
+            player.name = player.object.name
+            player.stats  = player.object.stats
 
-        player.permissions = Permissions(
-            groups.get_player_permissions(1)
-        )
+            player.permissions = Permissions(
+                groups.get_player_permissions(1, session=session)
+            )
 
-        player.client.ip.country_code = "OC"
-        player.client.ip.city = "w00t p00t!"
+            player.client.ip.country_code = "OC"
+            player.client.ip.city = "w00t p00t!"
 
-        return player
+            return player
 
     @property
     def is_bot(self) -> bool:
-        # TODO: Refactor bot related code to IRC client
-        return True if self.id == -1 else False
+        return self.object.is_bot if self.object else False
 
     @property
     def silenced(self) -> bool:
@@ -311,6 +311,10 @@ class Player:
     def is_verified(self) -> bool:
         return 'Verified' in self.groups
 
+    @property
+    def has_preview_access(self) -> bool:
+        return 'Preview' in self.groups
+
     def enqueue(self, data: bytes):
         """
         Enqueues the given data to the client.
@@ -428,14 +432,20 @@ class Player:
 
     def reload_object(self) -> DBUser:
         """Reload player object from database"""
-        self.object = users.fetch_by_id(self.id)
-        self.stats = self.object.stats
+        with app.session.database.managed_session() as session:
+            self.object = users.fetch_by_id(self.id, session=session)
+            self.stats = self.object.stats
 
-        self.update_leaderboard_stats()
-        self.update_status_cache()
-        self.reload_rank()
+            # Preload relationships
+            self.object.target_relationships
+            self.object.relationships
+            self.object.groups
 
-        return self.object
+            self.update_leaderboard_stats()
+            self.update_status_cache()
+            self.reload_rank()
+
+            return self.object
 
     def reload_rank(self) -> None:
         """Reload player rank from cache and update it if needed"""
@@ -495,22 +505,14 @@ class Player:
         # Send protocol version
         self.send_packet(self.packets.PROTOCOL_VERSION, config.PROTOCOL_VERSION)
 
-        if not config.DISABLE_CLIENT_VERIFICATION and not self.is_staff:
-            if not utils.valid_client_hash(self.client.hash):
-                self.logger.warning('Login Failed: Unsupported client')
-                self.login_failed(
-                    LoginError.Authentication,
-                    message=strings.UNSUPPORTED_HASH
-                )
-                self.close_connection()
-                return
-
         if client.hash.adapters != 'runningunderwine':
             # Check adapters md5
             adapters_hash = hashlib.md5(client.hash.adapters.encode()).hexdigest()
 
             if adapters_hash != client.hash.adapters_md5:
-                self.transport.write(b'no.\r\n')
+                officer.call(
+                    f'Player tried to log in with a modified adapters file: {adapters_hash}'
+                )
                 self.close_connection()
                 return
 
@@ -524,6 +526,11 @@ class Player:
             self.name = user.name
             self.stats = user.stats
             self.object = user
+
+            # Preload relationships
+            self.object.target_relationships
+            self.object.relationships
+            self.object.groups
 
             self.permissions = Permissions(groups.get_player_permissions(self.id, session))
             self.groups = [group.name for group in groups.fetch_user_groups(self.id, True, session)]
@@ -544,21 +551,9 @@ class Player:
                 self.login_failed(LoginError.NotActivated)
                 return
 
-            latest_supported_version = list(versions.VERSIONS.keys())[0]
-
-            if (self.client.version.date > latest_supported_version) and not self.is_staff:
-                self.logger.warning('Login Failed: Unsupported version')
-                self.login_failed(
-                    LoginError.Authentication,
-                    message=strings.UNSUPPORTED_VERSION
-                )
-                officer.call(
-                    f'Player tried to log in with an unsupported version: {self.client.version} ({self.client.hash.md5})'
-                )
-                return
-
             if config.MAINTENANCE:
                 if not self.is_staff:
+                    # Bancho is in maintenance mode
                     self.logger.warning('Login Failed: Maintenance')
                     self.login_failed(
                         LoginError.ServerError,
@@ -567,6 +562,24 @@ class Player:
                     return
 
                 self.enqueue_announcement(strings.MAINTENANCE_MODE_ADMIN)
+
+            if (
+                not config.DISABLE_CLIENT_VERIFICATION
+                and not self.is_staff
+                and not self.has_preview_access
+            ):
+                # Check client's executable hash (Admins can bypass this check)
+                if not client_utils.is_valid_client_hash(self.client.hash.md5):
+                    self.logger.warning('Login Failed: Unsupported client')
+                    self.login_failed(
+                        LoginError.UpdateNeeded,
+                        message=strings.UNSUPPORTED_HASH
+                    )
+                    officer.call(
+                        f'Player tried to log in with an unsupported version: {self.client.version} ({self.client.hash.md5})'
+                    )
+                    self.close_connection()
+                    return
 
             if not self.is_tourney_client:
                 if (other_user := app.session.players.by_id(user.id)):
@@ -659,7 +672,7 @@ class Player:
         self.enqueue_irc_player(app.session.bot_player)
 
         # Append to player collection
-        app.session.players.append(self)
+        app.session.players.add(self)
 
         # Enqueue other players
         self.enqueue_players(app.session.players)
@@ -964,13 +977,18 @@ class Player:
                 self.enqueue_presence(player)
             return
 
-        n = max(1, 150)
+        player_chunks = itertools.zip_longest(
+            *[iter(players)] * 128
+        )
 
-        # Split players into chunks to avoid any buffer overflows
-        for chunk in (players[i:i+n] for i in range(0, len(players), n)):
+        for chunk in player_chunks:
             self.send_packet(
                 self.packets.USER_PRESENCE_BUNDLE,
-                [player.id for player in chunk]
+                [
+                    player.id
+                    for player in chunk
+                    if player != None
+                ]
             )
 
     def enqueue_irc_player(self, player):

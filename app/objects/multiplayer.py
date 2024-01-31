@@ -88,12 +88,13 @@ class Slot:
         self.mods   = other.mods
 
     def reset(self, new_status = SlotStatus.Open) -> None:
-        self.player  = None
-        self.status  = new_status
-        self.team    = SlotTeam.Neutral
-        self.mods    = Mods.NoMod
-        self.loaded  = False
-        self.skipped = False
+        self.player     = None
+        self.status     = new_status
+        self.team       = SlotTeam.Neutral
+        self.mods       = Mods.NoMod
+        self.loaded     = False
+        self.skipped    = False
+        self.has_failed = False
 
 @dataclass(slots=True)
 class StartingTimers:
@@ -421,7 +422,10 @@ class Match:
         events.create(
             self.db_match.id,
             type=EventType.Kick,
-            data={'user_id': player.id}
+            data={
+                'user_id': player.id,
+                'name': player.name
+            }
         )
 
         if player == self.host:
@@ -434,7 +438,10 @@ class Match:
             events.create(
                 self.db_match.id,
                 type=EventType.Host,
-                data={'old_host': player.id, 'new_host': self.host.id}
+                data={
+                    'new': {'id': self.host.id, 'name': self.host.name},
+                    'previous': {'id': player.id, 'name': player.name}
+                }
             )
 
         self.update()
@@ -472,7 +479,7 @@ class Match:
 
         last_game = events.fetch_last_by_type(
             self.db_match.id,
-            type=EventType.Start
+            type=EventType.Result
         )
 
         if not last_game:

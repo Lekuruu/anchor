@@ -11,10 +11,10 @@ from app.common.logging import Console, File
 from app.objects.channel import Channel
 from app.objects.player import Player
 from app.jobs import (
-    rank_indexing,
     activities,
     events,
-    pings
+    pings,
+    ranks
 )
 
 import logging
@@ -31,8 +31,8 @@ logging.basicConfig(
 )
 
 def setup():
-    app.session.logger.info(ANCHOR_ASCII_ART)
-    app.session.logger.info(f'anchor-{config.VERSION}')
+    app.session.logger.info(f'{ANCHOR_ASCII_ART}')
+    app.session.logger.info(f'Running anchor-{config.VERSION}')
     os.makedirs(config.DATA_PATH, exist_ok=True)
 
     app.session.logger.info('Loading channels...')
@@ -52,7 +52,7 @@ def setup():
 
     app.session.logger.info('Loading bot...')
 
-    app.session.players.append(
+    app.session.players.add(
         bot_player := Player.bot_player()
     )
     app.session.bot_player = bot_player
@@ -61,11 +61,16 @@ def setup():
     app.session.logger.info('Loading jobs...')
     app.session.jobs.submit(pings.ping_job)
     app.session.jobs.submit(events.event_listener)
-    app.session.jobs.submit(rank_indexing.index_ranks)
+    app.session.jobs.submit(ranks.index_ranks)
     app.session.jobs.submit(activities.match_activity)
 
     # Reset usercount
     usercount.set(0)
+
+    # Reset player statuses
+    for key in status.get_all():
+        player_id = key.split(':')[-1]
+        status.delete(player_id)
 
 def shutdown():
     # Reset usercount
@@ -83,17 +88,19 @@ def shutdown():
 
     signal.signal(signal.SIGINT, force_exit)
 
-    for thread in app.session.pool.threads:
-        app.session.logger.warning(f'Shutting down: "{thread.name}"')
-
 def main():
-    http_factory = HttpBanchoFactory()
-    tcp_factory = TcpBanchoFactory()
+    try:
+        http_factory = HttpBanchoFactory()
+        tcp_factory = TcpBanchoFactory()
 
-    reactor.listenTCP(config.HTTP_PORT, http_factory)
+        reactor.suggestThreadPoolSize(config.BANCHO_WORKERS)
+        reactor.listenTCP(config.HTTP_PORT, http_factory)
 
-    for port in config.TCP_PORTS:
-        reactor.listenTCP(port, tcp_factory)
+        for port in config.TCP_PORTS:
+            reactor.listenTCP(port, tcp_factory)
+    except Exception as e:
+        app.session.logger.error(f'Failed to start server: "{e}"')
+        exit(1)
 
     reactor.addSystemEventTrigger('before', 'startup', setup)
     reactor.addSystemEventTrigger('after', 'shutdown', shutdown)

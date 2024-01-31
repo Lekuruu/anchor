@@ -38,6 +38,7 @@ from .objects.multiplayer import StartingTimers
 from .objects.channel import Channel
 from .common.objects import bMessage
 from .objects.player import Player
+from .tcp import TcpBanchoProtocol
 
 import timeago
 import config
@@ -442,10 +443,16 @@ def mp_host(ctx: Context):
     if not (target := match.get_player(name)):
         return ['Could not find this player.']
 
+    if target is match.host:
+        return ['You are already the host.']
+
     events.create(
         match.db_match.id,
         type=EventType.Host,
-        data={'old_host': target.id, 'new_host': match.host.id}
+        data={
+            'previous': {'id': target.id, 'name': target.name},
+            'new': {'id': match.host.id, 'name': match.host.name}
+        }
     )
 
     match.host = target
@@ -1210,7 +1217,7 @@ def unrestrict(ctx: Context) -> List | None:
         return [f'Invalid syntax: !{ctx.trigger} <name> <restore scores (true/false)>']
 
     username = ctx.args[0]
-    restore_scores = False
+    restore_scores = True
 
     if len(ctx.args) > 1:
         restore_scores = eval(ctx.args[1].capitalize())
@@ -1345,9 +1352,12 @@ def get_command(
     target: Channel | Player,
     message: str
 ) -> CommandResponse | None:
-    # Parse command
-    trigger, *args = shlex.split(message.strip()[1:])
-    trigger = trigger.lower()
+    try:
+        # Parse command
+        trigger, *args = shlex.split(message.strip()[1:])
+        trigger = trigger.lower()
+    except ValueError:
+        return
 
     # Regular commands
     for command in commands:
@@ -1470,7 +1480,7 @@ def execute(
     player.logger.info(f'[{app.session.bot_player.name}]: {", ".join(command.response)}')
 
     target_name = target.name \
-        if type(target) == Player \
+        if type(target) != Channel \
         else target.display_name
 
     # Send to sender
